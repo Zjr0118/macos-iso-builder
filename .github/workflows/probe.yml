@@ -1,0 +1,19 @@
+name: Probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: macos-13
+    timeout-minutes: 30
+    steps:
+      - name: Info
+        run: |
+          sw_vers
+          uname -m
+          df -h /
+          brew --version || true
+      - name: List installers
+        run: |
+          softwareupdate --list-full-installers 2>&1 | head -40
+          echo "--- after cleanup ---"
+          sudo rm -rf /Applications/Xcode*.app /Library/Developer/CoreSimulator /Library/Developer/Xcode/DerivedData || true
+          df -h /
