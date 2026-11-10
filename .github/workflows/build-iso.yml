@@ -12,7 +12,7 @@ on:
         default: '14.8.4'
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15-intel
     timeout-minutes: 340
     steps:
       - name: 0. Runner info + cleanup
