@@ -1,0 +1,93 @@
+name: Build macOS ISO
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '关键匹配词，例如 macOS Sonoma'
+        required: true
+        default: 'macOS Sonoma'
+      version:
+        description: '留空=自动取该大版本最新；也可填 14.7.2 之类'
+        required: false
+        default: ''
+jobs:
+  build:
+    runs-on: macos-13
+    timeout-minutes: 330
+    steps:
+      - name: 1. Disk cleanup
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf /Applications/Xcode*.app /Library/Developer/CoreSimulator /Library/Developer/Xcode/DerivedData /Users/runner/Library/Developer ~/Library/Developer 2>/dev/null || true
+          sudo rm -rf /usr/local/share/dotnet 2>/dev/null || true
+          df -h /
+
+      - name: 2. List available installers
+        run: |
+          softwareupdate --list-full-installers 2>&1 | tee /tmp/installer_list.txt
+          sw_vers
+
+      - name: 3. Pick version
+        id: pick
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.version }}"
+          if [ -z "$VER" ]; then
+            VER=$(grep -i "${{ inputs.target }}" /tmp/installer_list.txt | grep -oE '\d+\.\d+(\.\d+)?' | sort -V | tail -1 || true)
+          fi
+          if [ -z "$VER" ]; then echo "no version matched"; exit 1; fi
+          echo "用版本: $VER"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: 4. Download macOS installer (Apple 官方 CDN)
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo softwareupdate --fetch-full-installer --full-installer-version "${{ steps.pick.outputs.ver }}"
+          ls -lh /Applications | grep -i "Install macOS" || true
+          df -h /
+
+      - name: 5. Build bootable media image (createinstallmedia)
+        run: |
+          set -euo pipefail
+          APP=$(ls -d /Applications/Install\ macOS*.app | head -1)
+          echo "APP=$APP"
+          hdiutil create -o /tmp/media -size 18g -layout SPUD -fs HFS+J
+          hdiutil attach /tmp/media.dmg -noverify -mountpoint /Volumes/mediasrc
+          sudo "$APP/Contents/Resources/createinstallmedia" --volume /Volumes/mediasrc --nointeraction
+          sync
+          hdiutil detach "/Volumes/$(basename "$APP" .app)" || hdiutil detach /Volumes/Install* -force || true
+          df -h /
+
+      - name: 6. Free space then convert to ISO
+        run: |
+          set -euo pipefail
+          sudo rm -rf /Applications/Install\ macOS*.app
+          df -h /
+          hdiutil convert /tmp/media.dmg -format UDTO -o /tmp/macOS
+          mv /tmp/macOS.cdr /tmp/macOS.iso
+          ls -lh /tmp/macOS.iso
+          file /tmp/macOS.iso
+          shasum -a 256 /tmp/macOS.iso | tee /tmp/macOS.iso.sha256
+          df -h /
+
+      - name: 7. Split into <2GB parts
+        run: |
+          set -euo pipefail
+          du -h /tmp/macOS.iso
+          split -b 1900m -d -a 2 /tmp/macOS.iso /tmp/part_
+          rm -f /tmp/macOS.iso
+          ls -lh /tmp/part_* | head -20
+
+      - name: 8. Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="iso-${{ steps.pick.outputs.ver }}-$(date +%Y%m%d%H%M)"
+          gh release create "$TAG" /tmp/part_* /tmp/macOS.iso.sha256 \
+            --repo "${{ github.repository }}" \
+            --title "macOS ${{ steps.pick.outputs.ver }} ISO" \
+            --notes "version: ${{ steps.pick.outputs.ver }}"
+          echo "TAG=$TAG" >> "$GITHUB_STEP_SUMMARY"
