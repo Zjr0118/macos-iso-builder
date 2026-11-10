@@ -9,7 +9,7 @@ on:
       version:
         description: '优先尝试的版本，例如 14.8.4；留空取最新'
         required: false
-        default: '14.8.4'
+        default: '14.8.9'
 jobs:
   build:
     runs-on: macos-15-intel
@@ -35,7 +35,7 @@ jobs:
           WANT="${{ inputs.version }}"
           APP=""
           mkdir -p /tmp/out
-          available() { grep -oiE '[0-9]+\.[0-9]+(\.[0-9]+)?' /tmp/list.txt | sort -V | tail -1; }
+          available() { grep -i "${{ inputs.target }}" /tmp/list.txt | grep -oiE '[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -V | tail -1; }
 
           try_su() {
             v="$1"; [ -z "$v" ] && return 1
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           APP="${{ steps.fetch.outputs.app }}"
           rm -f /tmp/media.dmg
-          hdiutil create -o /tmp/media -size 18g -layout SPUD -fs HFS+J
+          hdiutil create -o /tmp/media -size 20g -layout SPUD -fs HFS+J
           hdiutil attach /tmp/media.dmg -noverify -mountpoint /Volumes/mediasrc
           sudo "$APP/Contents/Resources/createinstallmedia" --volume /Volumes/mediasrc --nointeraction
           sync
