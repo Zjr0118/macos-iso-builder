@@ -10,6 +10,8 @@ on:
         description: '优先尝试的版本，例如 14.8.4；留空取最新'
         required: false
         default: '14.8.9'
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: macos-15-intel
@@ -81,6 +83,10 @@ jobs:
           sudo "$APP/Contents/Resources/createinstallmedia" --volume /Volumes/mediasrc --nointeraction
           sync
           for v in /Volumes/Install*; do hdiutil detach "$v" -force || true; done
+          hdiutil resize -limits /tmp/media.dmg
+          MIN=$(hdiutil resize -limits /tmp/media.dmg | tail -1 | awk '{print $1}')
+          hdiutil resize -sectors $((MIN+20480)) /tmp/media.dmg
+          hdiutil resize -limits /tmp/media.dmg
           df -h /
 
       - name: 4. ISO
