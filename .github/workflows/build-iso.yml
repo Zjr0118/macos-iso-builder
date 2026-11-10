@@ -7,63 +7,86 @@ on:
         required: true
         default: 'macOS Sonoma'
       version:
-        description: '留空=自动取该大版本最新；也可填 14.7.2 之类'
+        description: '优先尝试的版本，例如 14.8.4；留空取最新'
         required: false
-        default: ''
+        default: '14.8.4'
 jobs:
   build:
-    runs-on: macos-13
-    timeout-minutes: 330
+    runs-on: macos-14
+    timeout-minutes: 340
     steps:
-      - name: 1. Disk cleanup
+      - name: 0. Runner info + cleanup
         run: |
           set -x
+          sw_vers
+          uname -m
           df -h /
           sudo rm -rf /Applications/Xcode*.app /Library/Developer/CoreSimulator /Library/Developer/Xcode/DerivedData /Users/runner/Library/Developer ~/Library/Developer 2>/dev/null || true
-          sudo rm -rf /usr/local/share/dotnet 2>/dev/null || true
           df -h /
 
-      - name: 2. List available installers
+      - name: 1. List installers offered
         run: |
-          softwareupdate --list-full-installers 2>&1 | tee /tmp/installer_list.txt
-          sw_vers
+          softwareupdate --list-full-installers 2>&1 | tee /tmp/list.txt || true
 
-      - name: 3. Pick version
-        id: pick
+      - name: 2. Fetch installer
+        id: fetch
         run: |
-          set -euo pipefail
-          VER="${{ inputs.version }}"
-          if [ -z "$VER" ]; then
-            VER=$(grep -i "${{ inputs.target }}" /tmp/installer_list.txt | grep -oE '\d+\.\d+(\.\d+)?' | sort -V | tail -1 || true)
+          set -uo pipefail
+          WANT="${{ inputs.version }}"
+          APP=""
+          mkdir -p /tmp/out
+          available() { grep -oiE '[0-9]+\.[0-9]+(\.[0-9]+)?' /tmp/list.txt | sort -V | tail -1; }
+
+          try_su() {
+            v="$1"; [ -z "$v" ] && return 1
+            echo ">>> softwareupdate try $v"
+            sudo softwareupdate --fetch-full-installer --full-installer-version "$v" || return 1
+            APP=$(ls -d /Applications/Install\ macOS*.app 2>/dev/null | head -1)
+            [ -n "$APP" ]
+          }
+
+          try_mist() {
+            v="$1"
+            echo ">>> mist try ${v:-latest}"
+            brew install mist-cli >/dev/null 2>&1 || brew install misterio/mist/mist-cli >/dev/null 2>&1 || return 1
+            if [ -n "$v" ]; then
+              mist download installer "$v" /tmp/out --type app --no-progress || return 1
+            else
+              mist download installer "${{ inputs.target }}" /tmp/out --type app --no-progress || return 1
+            fi
+            APP=$(find /tmp/out /Applications -maxdepth 3 -name "Install macOS*.app" 2>/dev/null | head -1)
+            [ -n "$APP" ]
+          }
+
+          if try_su "$WANT"; then echo "OK su $WANT";
+          elif try_mist "$WANT"; then echo "OK mist $WANT";
+          else
+            LATEST=$(available); echo ">>> fallback latest: $LATEST"
+            if try_su "$LATEST"; then echo "OK su $LATEST";
+            elif try_mist "$LATEST"; then echo "OK mist $LATEST";
+            else echo "ALL FAILED"; exit 1; fi
           fi
-          if [ -z "$VER" ]; then echo "no version matched"; exit 1; fi
-          echo "用版本: $VER"
-          echo "ver=$VER" >> "$GITHUB_OUTPUT"
-
-      - name: 4. Download macOS installer (Apple 官方 CDN)
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo softwareupdate --fetch-full-installer --full-installer-version "${{ steps.pick.outputs.ver }}"
-          ls -lh /Applications | grep -i "Install macOS" || true
-          df -h /
-
-      - name: 5. Build bootable media image (createinstallmedia)
-        run: |
-          set -euo pipefail
-          APP=$(ls -d /Applications/Install\ macOS*.app | head -1)
           echo "APP=$APP"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          du -sh "$APP"
+          df -h /
+
+      - name: 3. createinstallmedia
+        run: |
+          set -euo pipefail
+          APP="${{ steps.fetch.outputs.app }}"
+          rm -f /tmp/media.dmg
           hdiutil create -o /tmp/media -size 18g -layout SPUD -fs HFS+J
           hdiutil attach /tmp/media.dmg -noverify -mountpoint /Volumes/mediasrc
           sudo "$APP/Contents/Resources/createinstallmedia" --volume /Volumes/mediasrc --nointeraction
           sync
-          hdiutil detach "/Volumes/$(basename "$APP" .app)" || hdiutil detach /Volumes/Install* -force || true
+          for v in /Volumes/Install*; do hdiutil detach "$v" -force || true; done
           df -h /
 
-      - name: 6. Free space then convert to ISO
+      - name: 4. ISO
         run: |
           set -euo pipefail
-          sudo rm -rf /Applications/Install\ macOS*.app
+          sudo rm -rf /Applications/Install\ macOS*.app /tmp/out || true
           df -h /
           hdiutil convert /tmp/media.dmg -format UDTO -o /tmp/macOS
           mv /tmp/macOS.cdr /tmp/macOS.iso
@@ -72,22 +95,19 @@ jobs:
           shasum -a 256 /tmp/macOS.iso | tee /tmp/macOS.iso.sha256
           df -h /
 
-      - name: 7. Split into <2GB parts
+      - name: 5. split
         run: |
           set -euo pipefail
-          du -h /tmp/macOS.iso
           split -b 1900m -d -a 2 /tmp/macOS.iso /tmp/part_
           rm -f /tmp/macOS.iso
-          ls -lh /tmp/part_* | head -20
+          ls -lh /tmp/part_*
+          du -ch /tmp/part_* | tail -1
 
-      - name: 8. Publish release assets
+      - name: 6. release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="iso-${{ steps.pick.outputs.ver }}-$(date +%Y%m%d%H%M)"
-          gh release create "$TAG" /tmp/part_* /tmp/macOS.iso.sha256 \
-            --repo "${{ github.repository }}" \
-            --title "macOS ${{ steps.pick.outputs.ver }} ISO" \
-            --notes "version: ${{ steps.pick.outputs.ver }}"
-          echo "TAG=$TAG" >> "$GITHUB_STEP_SUMMARY"
+          TAG="iso-$(date +%Y%m%d%H%M)"
+          gh release create "$TAG" /tmp/part_* /tmp/macOS.iso.sha256 --repo "${{ github.repository }}" --title "macOS ISO $TAG" --notes "parts + sha256"
+          echo "TAG=$TAG"
